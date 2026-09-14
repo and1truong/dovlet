@@ -36,5 +36,24 @@ function canvas(width = 1200, height = 1200) {
   // A forged length cannot cause an allocation outside the image capacity.
   for (let bit = 64; bit < 96; bit++) image.pixels[Math.floor(bit / 3) * 4 + bit % 3] |= 1;
   assert.throws(() => extract(image));
+  // Changing inputs during decryption must never publish stale plaintext.
+  document.createElement = () => ({getContext: () => ({drawImage(){}})});
+  await vm.runInThisContext(`(async () => {
+    const oldLoad=load, oldExtract=extract, oldUnzip=unzip;
+    try {
+      load=async () => ({naturalWidth:1,naturalHeight:1});
+      extract=() => new Uint8Array();
+      let release;
+      unzip=() => new Promise(resolve => {release=resolve});
+      $("secretImage").files=[{}]; $("readPassword").value="original-password";
+      const pending=$("decode").onclick();
+      await Promise.resolve();
+      $("readPassword").value="changed-password";
+      $("readPassword").oninput();
+      release("stale plaintext");
+      await pending;
+      if ($("output").value || !$("decoded").hidden) throw Error("Stale decode exposed");
+    } finally {load=oldLoad;extract=oldExtract;unzip=oldUnzip}
+  })()`);
   console.log('PASS: Unicode, compression, AES ZIP, LSB, alpha preservation, wrong password, tampering, missing header, capacity, forged length');
 })().catch(error => {console.error(error); process.exitCode = 1});

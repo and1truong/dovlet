@@ -310,7 +310,8 @@
       MAX = 500000;
     let coverFile = null,
       zipResult = null,
-      downloadURL = null;
+      downloadURL = null,
+      decodeVersion = 0;
     function status(s, error = false) {
       $("status").textContent = s;
       $("status").className = error ? "error" : "";
@@ -562,6 +563,7 @@
         );
       });
     function clearResult() {
+      decodeVersion++;
       $("output").value = "";
       $("decoded").hidden = true;
       zipResult = null;
@@ -569,6 +571,7 @@
     $("decode").onclick = () =>
       busy("decode", async () => {
         clearResult();
+        const version = decodeVersion;
         const file = $("secretImage").files[0],
           password = $("readPassword").value;
         if (!file || !password) throw Error("Chọn ảnh và nhập password.");
@@ -580,8 +583,11 @@
         c.getContext("2d").drawImage(image, 0, 0);
         const b = extract(c);
         try {
-          $("output").value = await unzip(b, password);
+          const text = await unzip(b, password);
+          if (version !== decodeVersion) return;
+          $("output").value = text;
         } catch {
+          if (version !== decodeVersion) return;
           throw Error("Sai password hoặc dữ liệu đã bị hỏng.");
         }
         zipResult = b;
