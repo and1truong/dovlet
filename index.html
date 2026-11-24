@@ -188,7 +188,7 @@
       <h1>dovlet<span style="color: #8aa274">.</span></h1>
       <span class="badge">OFFLINE · CHỈ TRÊN MÁY BẠN</span>
     </header>
-    <p>Một bức ảnh. Một lời nhắn chỉ người có password đọc được.</p>
+    <p>Một bức ảnh. Một lời nhắn hoặc một file ZIP chỉ người có password đọc được.</p>
     <nav role="tablist">
       <button role="tab" id="createTab" aria-selected="true">Tạo ảnh</button
       ><button role="tab" id="readTab" aria-selected="false">Đọc ảnh</button>
@@ -196,6 +196,14 @@
     <section id="createPanel" class="grid">
       <div class="card">
         <div class="field">
+          <label>Loại nội dung</label>
+          <label style="display: inline; font-weight: 400; margin-right: 16px"
+            ><input type="radio" name="mode" value="text" checked /> Text</label
+          ><label style="display: inline; font-weight: 400"
+            ><input type="radio" name="mode" value="file" /> File ZIP</label
+          >
+        </div>
+        <div class="field" id="textField">
           <label for="message">Nội dung</label
           ><textarea
             id="message"
@@ -203,6 +211,15 @@
             maxlength="500000"
           ></textarea
           ><small id="count">0 byte · tối đa 500 KB UTF-8</small>
+        </div>
+        <div class="field" id="fileField" hidden>
+          <label for="zipFile">File ZIP</label
+          ><input id="zipFile" type="file" accept=".zip,application/zip" />
+          <small id="zipInfo"></small>
+          <small
+            >File ZIP tối đa 1,4 MB. Ảnh mặc định 1.200 × 1.200 chứa được
+            khoảng 540 KB; dùng ảnh bìa lớn hơn nếu file lớn.</small
+          >
         </div>
         <div class="field">
           <label for="password">Password</label>
@@ -268,12 +285,23 @@
         </div>
         <button id="decode" class="primary">Mở lời nhắn</button>
         <div id="decoded" hidden style="margin-top: 24px">
-          <label for="output">Nội dung đã giải mã</label
-          ><textarea id="output" readonly></textarea>
+          <div id="textResult">
+            <label for="output">Nội dung đã giải mã</label
+            ><textarea id="output" readonly></textarea>
+            <div class="actions">
+              <button id="copy">Copy text</button
+              ><button id="saveText">Tải .txt</button>
+            </div>
+          </div>
+          <div id="fileResult" hidden>
+            <label>File đã giải mã</label>
+            <p id="fileInfo" style="margin: 0 0 12px"></p>
+            <div class="actions">
+              <button id="saveFile">Tải file ZIP ↓</button>
+            </div>
+          </div>
           <div class="actions">
-            <button id="copy">Copy text</button
-            ><button id="saveText">Tải .txt</button
-            ><button id="saveZip">Tải ZIP mã hóa</button
+            <button id="saveZip">Tải ZIP mã hóa</button
             ><button id="clear">Xóa kết quả</button>
           </div>
         </div>
@@ -289,12 +317,13 @@
       <summary>Định dạng & quyền riêng tư</summary>
       <p>
         Không network, CDN, analytics hoặc lưu trữ trình duyệt. zip.js 2.7.57
-        được nhúng kèm (BSD-3-Clause). ZIP AES-256 (WinZip AES) chứa
-        message.txt; RGB LSB, 1 bit/kênh. Header APPLE001 + uint32 big-endian
-        chỉ độ dài ZIP. Giấu dữ liệu không bảo đảm không bị phát hiện. ZIP có
-        thể mở bằng ứng dụng hỗ trợ WinZip AES. Giới hạn đọc: PNG 25 MB, 16
-        triệu pixel, nội dung 500 KB. Dùng Chrome/Edge/Firefox/Safari hiện đại;
-        tải HTML về và mở trực tiếp.
+        được nhúng kèm (BSD-3-Clause). ZIP AES-256 (WinZip AES) chứa một
+        entry duy nhất: message.txt (chế độ Text) hoặc file .zip gốc (chế độ
+        File ZIP, lưu nguyên không nén lại); RGB LSB, 1 bit/kênh. Header
+        APPLE001 + uint32 big-endian chỉ độ dài ZIP. Giấu dữ liệu không bảo
+        đảm không bị phát hiện. ZIP có thể mở bằng ứng dụng hỗ trợ WinZip AES.
+        Giới hạn đọc: PNG 25 MB, 16 triệu pixel, text 500 KB, file ZIP 1,4 MB.
+        Dùng Chrome/Edge/Firefox/Safari hiện đại; tải HTML về và mở trực tiếp.
       </p>
     </details>
   </main>
@@ -307,9 +336,11 @@
     const $ = (id) => document.getElementById(id),
       enc = new TextEncoder(),
       magic = enc.encode("APPLE001"),
-      MAX = 500000;
+      MAX = 500000,
+      MAX_FILE = 1400000;
     let coverFile = null,
       zipResult = null,
+      decodedFile = null,
       downloadURL = null,
       decodeVersion = 0;
     function status(s, error = false) {
@@ -425,6 +456,57 @@
         enc.encode($("message").value).length.toLocaleString() +
         " byte · tối đa 500 KB UTF-8";
     };
+    function formatBytes(n) {
+      return n < 1024
+        ? n + " byte"
+        : n < 1024 * 1024
+          ? (n / 1024).toFixed(1) + " KB"
+          : (n / (1024 * 1024)).toFixed(2) + " MB";
+    }
+    function safeZipName(name) {
+      const base = String(name || "")
+        .split(/[\\/]/)
+        .pop()
+        .trim();
+      if (!base || base === "." || base === ".." || /[/\\]/.test(base))
+        throw Error("Tên file ZIP không hợp lệ.");
+      if (base.length > 200) throw Error("Tên file ZIP quá dài.");
+      if (!/\.zip$/i.test(base)) throw Error("Chọn file có đuôi .zip.");
+      return base;
+    }
+    function mode() {
+      return (
+        document.querySelector('input[name="mode"]:checked')?.value || "text"
+      );
+    }
+    function setMode(m) {
+      $("textField").hidden = m !== "text";
+      $("fileField").hidden = m !== "file";
+    }
+    document
+      .querySelectorAll('input[name="mode"]')
+      .forEach((r) => (r.onchange = () => { setMode(mode()); status(""); }));
+    $("zipFile").onchange = async () => {
+      const f = $("zipFile").files[0] || null;
+      if (!f) {
+        $("zipInfo").textContent = "";
+        return;
+      }
+      try {
+        const name = safeZipName(f.name);
+        if (f.size === 0) throw Error("File ZIP rỗng.");
+        if (f.size > MAX_FILE) throw Error("File ZIP vượt 1,4 MB.");
+        const head = new Uint8Array(await f.slice(0, 4).arrayBuffer());
+        if (head.length < 2 || head[0] !== 0x50 || head[1] !== 0x4b)
+          throw Error("Không phải file ZIP (thiếu chữ ký PK).");
+        $("zipInfo").textContent = `${name} · ${formatBytes(f.size)}`;
+        status("");
+      } catch (e) {
+        $("zipFile").value = "";
+        $("zipInfo").textContent = "";
+        status(e.message, true);
+      }
+    };
     function pack(payload) {
       const out = new Uint8Array(12 + payload.length);
       out.set(magic);
@@ -463,7 +545,7 @@
           "Không tìm thấy lời nhắn. Ảnh có thể đã bị nén hoặc chỉnh sửa.",
         );
       const n = new DataView(h.buffer).getUint32(8);
-      if (n < 22 || n > cap - 12 || n > MAX + 10000)
+      if (n < 22 || n > cap - 12 || n > MAX_FILE + 10000)
         throw Error("Dữ liệu ảnh không hợp lệ hoặc bị hỏng.");
       return bytes(n + 12).slice(12);
     }
@@ -479,20 +561,22 @@
       const r = new zip.ZipReader(new zip.Uint8ArrayReader(b));
       try {
         const entries = await r.getEntries();
-        if (
-          entries.length !== 1 ||
-          entries[0].filename !== "message.txt" ||
-          !entries[0].encrypted ||
-          entries[0].uncompressedSize > MAX
-        )
+        if (entries.length !== 1 || !entries[0].encrypted)
           throw Error("Invalid archive");
+        const entry = entries[0];
+        const isText = entry.filename === "message.txt";
+        const isFile =
+          /\.zip$/i.test(entry.filename) && !/[/\\]/.test(entry.filename);
+        if (!isText && !isFile) throw Error("Invalid archive");
+        const limit = isText ? MAX : MAX_FILE;
+        if (entry.uncompressedSize > limit) throw Error("Invalid archive");
         const chunks = [];
         let total = 0;
-        await entries[0].getData(
+        await entry.getData(
           new WritableStream({
             write(chunk) {
               total += chunk.length;
-              if (total > MAX) throw Error("Too large");
+              if (total > limit) throw Error("Too large");
               chunks.push(chunk.slice());
             },
           }),
@@ -504,7 +588,13 @@
           out.set(chunk, offset);
           offset += chunk.length;
         }
-        return new TextDecoder("utf-8", { fatal: true }).decode(out);
+        if (isText)
+          return {
+            kind: "text",
+            filename: "message.txt",
+            text: new TextDecoder("utf-8", { fatal: true }).decode(out),
+          };
+        return { kind: "file", filename: entry.filename, data: out };
       } finally {
         await r.close();
       }
@@ -521,20 +611,42 @@
     }
     $("export").onclick = () =>
       busy("export", async () => {
-        const text = $("message").value,
+        const m = mode(),
           password = $("password").value,
           file = coverFile;
-        if (!text.length) throw Error("Nhập nội dung trước.");
-        if (enc.encode(text).length > MAX) throw Error("Nội dung vượt 500 KB.");
         if (Array.from(password).length < 12)
           throw Error("Password cần ít nhất 12 ký tự.");
         status("Đang mã hóa và tạo ảnh…");
         const w = new zip.ZipWriter(new zip.Uint8ArrayWriter());
-        await w.add("message.txt", new zip.TextReader(text), {
-          password,
-          encryptionStrength: 3,
-          level: 6,
-        });
+        let expected = null;
+        if (m === "text") {
+          const text = $("message").value;
+          if (!text.length) throw Error("Nhập nội dung trước.");
+          if (enc.encode(text).length > MAX)
+            throw Error("Nội dung vượt 500 KB.");
+          await w.add("message.txt", new zip.TextReader(text), {
+            password,
+            encryptionStrength: 3,
+            level: 6,
+          });
+          expected = { kind: "text", text };
+        } else {
+          const f = $("zipFile").files[0];
+          if (!f) throw Error("Chọn file ZIP trước.");
+          const filename = safeZipName(f.name);
+          const bytes = new Uint8Array(await f.arrayBuffer());
+          if (bytes.length === 0) throw Error("File ZIP rỗng.");
+          if (bytes.length > MAX_FILE) throw Error("File ZIP vượt 1,4 MB.");
+          if (bytes[0] !== 0x50 || bytes[1] !== 0x4b)
+            throw Error("Không phải file ZIP (thiếu chữ ký PK).");
+          // File ZIP đã nén sẵn: lưu nguyên (level 0), không nén lại.
+          await w.add(filename, new zip.Uint8ArrayReader(bytes), {
+            password,
+            encryptionStrength: 3,
+            level: 0,
+          });
+          expected = { kind: "file", filename, data: bytes };
+        }
         const b = await w.close();
         const c = document.createElement("canvas");
         await drawCover(c, file);
@@ -550,7 +662,17 @@
         check.width = image.naturalWidth;
         check.height = image.naturalHeight;
         check.getContext("2d").drawImage(image, 0, 0);
-        if ((await unzip(extract(check), password)) !== text)
+        const verified = await unzip(extract(check), password);
+        if (verified.kind !== expected.kind)
+          throw Error("Kiểm tra ảnh thất bại.");
+        if (verified.kind === "text" && verified.text !== expected.text)
+          throw Error("Kiểm tra ảnh thất bại.");
+        if (
+          verified.kind === "file" &&
+          (verified.filename !== expected.filename ||
+            verified.data.length !== expected.data.length ||
+            !verified.data.every((v, i) => v === expected.data[i]))
+        )
           throw Error("Kiểm tra ảnh thất bại.");
         if (downloadURL) URL.revokeObjectURL(downloadURL);
         downloadURL = URL.createObjectURL(blob);
@@ -566,7 +688,10 @@
       decodeVersion++;
       $("output").value = "";
       $("decoded").hidden = true;
+      $("textResult").hidden = false;
+      $("fileResult").hidden = true;
       zipResult = null;
+      decodedFile = null;
     }
     $("decode").onclick = () =>
       busy("decode", async () => {
@@ -582,17 +707,28 @@
         c.height = image.naturalHeight;
         c.getContext("2d").drawImage(image, 0, 0);
         const b = extract(c);
+        let result;
         try {
-          const text = await unzip(b, password);
-          if (version !== decodeVersion) return;
-          $("output").value = text;
+          result = await unzip(b, password);
         } catch {
           if (version !== decodeVersion) return;
           throw Error("Sai password hoặc dữ liệu đã bị hỏng.");
         }
+        if (version !== decodeVersion) return;
         zipResult = b;
+        if (result.kind === "text") {
+          $("output").value = result.text;
+          $("textResult").hidden = false;
+          $("fileResult").hidden = true;
+          status("Đã giải mã.");
+        } else {
+          decodedFile = result;
+          $("fileInfo").textContent = `${result.filename} · ${formatBytes(result.data.length)}`;
+          $("textResult").hidden = true;
+          $("fileResult").hidden = false;
+          status(`Đã giải mã file ZIP: ${result.filename}.`);
+        }
         $("decoded").hidden = false;
-        status("Đã giải mã.");
       });
     $("secretImage").onchange = clearResult;
     $("readPassword").oninput = clearResult;
@@ -615,6 +751,13 @@
         new Blob([$("output").value], { type: "text/plain;charset=utf-8" }),
         "message.txt",
       );
+    $("saveFile").onclick = () => {
+      if (decodedFile)
+        save(
+          new Blob([decodedFile.data], { type: "application/zip" }),
+          decodedFile.filename,
+        );
+    };
     $("saveZip").onclick = () => {
       if (zipResult)
         save(new Blob([zipResult], { type: "application/zip" }), "message.zip");
