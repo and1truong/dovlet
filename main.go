@@ -1,4 +1,4 @@
-// Command dovlet hides password-encrypted text inside PNG images.
+// Command dovlet hides password-encrypted text or a ZIP file inside PNG images.
 // It is byte-compatible with the Dovlet web app.
 package main
 
@@ -22,8 +22,8 @@ var version = "dev"
 const usage = `dovlet - private messages, carried inside pictures
 
 Usage:
-  dovlet encode [flags]            encrypt a message and hide it in a PNG
-  dovlet decode [flags] IMAGE.png  recover the message from a PNG
+  dovlet encode [flags]            encrypt a message or ZIP file and hide it in a PNG
+  dovlet decode [flags] IMAGE.png  recover the message or ZIP file from a PNG
   dovlet version
 
 The password is read from --password-file, then $DOVLET_PASSWORD, and
@@ -91,15 +91,17 @@ func strFlag(fs *flag.FlagSet, p *string, short, long, help string) {
 }
 
 func runEncode(args []string) error {
-	var message, input, cover, output, pwFile string
+	var message, input, zipFile, cover, output, pwFile string
 	var force bool
 	fs := flag.NewFlagSet("encode", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprint(fs.Output(), `Usage: dovlet encode [-m TEXT | -i FILE] [-c COVER] [-o OUT.png] [flags]
+		fmt.Fprint(fs.Output(), `Usage: dovlet encode [-m TEXT | -i FILE | -z ZIP] [-c COVER] [-o OUT.png] [flags]
 
-Encrypts the message (AES-256 ZIP) and hides it in a PNG. With neither -m nor
--i the message is read from stdin. The PNG is decoded again before it is
-written to make sure the message can be recovered.
+Encrypts the message (AES-256 ZIP) and hides it in a PNG. With neither -m, -i
+nor -z the message is read from stdin. -z embeds a ZIP file instead of text,
+keeping its filename (- reads the ZIP from stdin and names it file.zip).
+The PNG is decoded again before it is written to make sure the message can
+be recovered.
 
 Flags:
 `)
@@ -107,6 +109,7 @@ Flags:
 	}
 	strFlag(fs, &message, "m", "message", "message `text` (visible to other local users via the process list; prefer -i or stdin for secrets)")
 	strFlag(fs, &input, "i", "input", "read the message from `file` (- for stdin)")
+	strFlag(fs, &zipFile, "z", "zip", "embed a ZIP `file` instead of a message (- for stdin, saved as file.zip)")
 	strFlag(fs, &cover, "c", "cover", "cover `image` (PNG, JPEG or WebP); default is the built-in apple")
 	strFlag(fs, &output, "o", "output", "output PNG `file`, - for stdout (default dovlet-message.png)")
 	fs.StringVar(&pwFile, "password-file", "", "read the password from the first line of `file`")
@@ -117,10 +120,16 @@ Flags:
 		return err
 	}
 	if len(pos) > 0 {
-		return usageError{fmt.Errorf("unexpected argument %q (use -m or -i for the message)", pos[0])}
+		return usageError{fmt.Errorf("unexpected argument %q (use -m, -i or -z for the message)", pos[0])}
 	}
-	if message != "" && input != "" {
-		return usageError{errors.New("use only one of -m and -i")}
+	sources := 0
+	for _, s := range []string{message, input, zipFile} {
+		if s != "" {
+			sources++
+		}
+	}
+	if sources > 1 {
+		return usageError{errors.New("use only one of -m, -i and -z")}
 	}
 	if output == "" {
 		output = "dovlet-message.png"
@@ -131,20 +140,39 @@ Flags:
 		}
 	}
 
-	var text []byte
-	switch {
-	case message != "":
-		text = []byte(message)
-	case input != "" && input != "-":
-		if text, err = readLimited(input, dovlet.MaxTextBytes); err != nil {
-			return err
+	var text, zipData []byte
+	var zipName string
+	isZip := zipFile != ""
+	if isZip {
+		if zipFile == "-" {
+			zipName = "file.zip"
+			if zipData, err = io.ReadAll(io.LimitReader(os.Stdin, dovlet.MaxZipBytes+1)); err != nil {
+				return err
+			}
+			if len(zipData) > dovlet.MaxZipBytes {
+				return fmt.Errorf("ZIP file is larger than the %d byte limit", dovlet.MaxZipBytes)
+			}
+		} else {
+			zipName = filepath.Base(zipFile)
+			if zipData, err = readLimited(zipFile, dovlet.MaxZipBytes); err != nil {
+				return err
+			}
 		}
-	default:
-		if term.IsTerminal(int(os.Stdin.Fd())) {
-			fmt.Fprintln(os.Stderr, "Type the message, then press Ctrl-D on an empty line:")
-		}
-		if text, err = io.ReadAll(io.LimitReader(os.Stdin, dovlet.MaxTextBytes+1)); err != nil {
-			return err
+	} else {
+		switch {
+		case message != "":
+			text = []byte(message)
+		case input != "" && input != "-":
+			if text, err = readLimited(input, dovlet.MaxTextBytes); err != nil {
+				return err
+			}
+		default:
+			if term.IsTerminal(int(os.Stdin.Fd())) {
+				fmt.Fprintln(os.Stderr, "Type the message, then press Ctrl-D on an empty line:")
+			}
+			if text, err = io.ReadAll(io.LimitReader(os.Stdin, dovlet.MaxTextBytes+1)); err != nil {
+				return err
+			}
 		}
 	}
 	var coverData []byte
@@ -154,7 +182,11 @@ Flags:
 		}
 	}
 	// Validate the message before asking for a password.
-	if err := dovlet.ValidateMessage(text, strings.Repeat("x", dovlet.MinPasswordRunes)); err != nil {
+	if isZip {
+		if err := dovlet.ValidateZipFile(zipName, zipData); err != nil {
+			return err
+		}
+	} else if err := dovlet.ValidateMessage(text, strings.Repeat("x", dovlet.MinPasswordRunes)); err != nil {
 		return err
 	}
 	password, err := readPassword(pwFile, true)
@@ -162,7 +194,12 @@ Flags:
 		return err
 	}
 
-	res, err := dovlet.Encode(text, password, coverData)
+	var res *dovlet.Result
+	if isZip {
+		res, err = dovlet.EncodeFile(zipName, zipData, password, coverData)
+	} else {
+		res, err = dovlet.Encode(text, password, coverData)
+	}
 	if err != nil {
 		return err
 	}
@@ -173,9 +210,9 @@ Flags:
 	if output == "-" {
 		dest = "stdout"
 	}
-	fmt.Fprintf(os.Stderr, "Wrote %s (%d×%d, %d of %d bytes used); decryption verified.\n"+
+	fmt.Fprintf(os.Stderr, "Wrote %s (%d×%d, %d of %d bytes used, entry %s); decryption verified.\n"+
 		"Send it as an original file/document attachment and share the password separately.\n",
-		dest, res.Width, res.Height, res.ZipBytes, res.Capacity)
+		dest, res.Width, res.Height, res.ZipBytes, res.Capacity, res.Entry)
 	return nil
 }
 
@@ -187,7 +224,8 @@ func runDecode(args []string) error {
 		fmt.Fprint(fs.Output(), `Usage: dovlet decode [-o FILE] [--zip FILE] [flags] IMAGE.png
 
 Recovers the message from a Dovlet PNG (- reads the image from stdin).
-The message is written to stdout unless -o is given.
+Text is written to stdout unless -o is given; a ZIP file is saved under
+its original filename unless -o is given.
 
 Flags:
 `)
@@ -212,10 +250,6 @@ Flags:
 			}
 		}
 	}
-	if zipOut == "-" && (output == "" || output == "-") {
-		return usageError{errors.New("the message and the ZIP cannot both go to stdout")}
-	}
-
 	var img []byte
 	if pos[0] == "-" {
 		img, err = io.ReadAll(io.LimitReader(os.Stdin, dovlet.MaxImageBytes+1))
@@ -229,19 +263,43 @@ Flags:
 	if err != nil {
 		return err
 	}
-	text, archive, err := dovlet.Decode(img, password)
+	entry, archive, err := dovlet.Decode(img, password)
 	if err != nil {
 		return err
+	}
+	if entry.IsText() {
+		if zipOut == "-" && (output == "" || output == "-") {
+			return usageError{errors.New("the message and the ZIP cannot both go to stdout")}
+		}
+		if zipOut != "" {
+			if err := writeOutput(zipOut, archive, 0o644, force); err != nil {
+				return err
+			}
+		}
+		if output == "" {
+			output = "-"
+		}
+		return writeOutput(output, entry.Data, 0o600, force)
+	}
+	// A ZIP file is saved under its original filename unless -o is given.
+	if output == "" {
+		output = entry.Filename
+		if !force {
+			if _, err := os.Stat(output); err == nil {
+				return fmt.Errorf("%s already exists (use -f to overwrite)", output)
+			}
+		}
+	}
+	if zipOut == "-" && output == "-" {
+		return usageError{errors.New("the message and the ZIP cannot both go to stdout")}
 	}
 	if zipOut != "" {
 		if err := writeOutput(zipOut, archive, 0o644, force); err != nil {
 			return err
 		}
 	}
-	if output == "" {
-		output = "-"
-	}
-	return writeOutput(output, text, 0o600, force)
+	fmt.Fprintf(os.Stderr, "Decoded ZIP file %s (%d bytes).\n", entry.Filename, len(entry.Data))
+	return writeOutput(output, entry.Data, 0o600, force)
 }
 
 func readLimited(path string, limit int) ([]byte, error) {

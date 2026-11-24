@@ -1,8 +1,11 @@
 // Runs the web app's own code (index.html) under Node to cross-check the Go
 // implementation. Usage:
-//   node interop.cjs INDEX.html embed   W H MSG_FILE OUT_RGBA   (password: $PW)
-//   node interop.cjs INDEX.html extract W H IN_RGBA  OUT_TEXT   (password: $PW)
+//   node interop.cjs INDEX.html embed       W H MSG_FILE OUT_RGBA   (password: $PW)
+//   node interop.cjs INDEX.html extract     W H IN_RGBA  OUT_TEXT   (password: $PW)
+//   node interop.cjs INDEX.html embed-zip   W H ZIP_FILE OUT_RGBA   (password: $PW)
+//   node interop.cjs INDEX.html extract-zip W H IN_RGBA  OUT_ZIP    (password: $PW)
 const fs = require('node:fs');
+const path = require('node:path');
 const vm = require('node:vm');
 const [html, mode, w, h, a, b] = process.argv.slice(2);
 const elements = {};
@@ -15,14 +18,20 @@ for (const m of fs.readFileSync(html, 'utf8').matchAll(/<script>([\s\S]*?)<\/scr
 const canvas = pixels => ({width: +w, height: +h, getContext: () => ({getImageData: () => ({data: pixels}), putImageData() {}})});
 (async () => {
   const password = process.env.PW;
-  if (mode === 'embed') {
+  if (mode === 'embed' || mode === 'embed-zip') {
     const writer = new zip.ZipWriter(new zip.Uint8ArrayWriter());
-    await writer.add('message.txt', new zip.TextReader(fs.readFileSync(a, 'utf8')), {password, encryptionStrength: 3, level: 6});
+    if (mode === 'embed') {
+      await writer.add('message.txt', new zip.TextReader(fs.readFileSync(a, 'utf8')), {password, encryptionStrength: 3, level: 6});
+    } else {
+      await writer.add(path.basename(a), new zip.Uint8ArrayReader(new Uint8Array(fs.readFileSync(a))), {password, encryptionStrength: 3, level: 0});
+    }
     const pixels = new Uint8ClampedArray(w * h * 4).fill(255);
     embed(canvas(pixels), await writer.close());
     fs.writeFileSync(b, pixels);
   } else {
     const pixels = new Uint8ClampedArray(fs.readFileSync(a));
-    fs.writeFileSync(b, await unzip(extract(canvas(pixels)), password));
+    const result = await unzip(extract(canvas(pixels)), password);
+    // Old web app returns a string; the current one returns {kind, ...}.
+    fs.writeFileSync(b, typeof result === 'string' ? result : (result.kind === 'file' ? result.data : result.text));
   }
 })().catch(e => { console.error(e); process.exit(1); });

@@ -14,7 +14,7 @@ var magic = []byte("APPLE001")
 const headerLen = 12
 
 var (
-	ErrCoverTooSmall = errors.New("cover image is too small for this message; use the default cover or a larger image")
+	ErrCoverTooSmall = errors.New("cover image is too small for this message; use a larger cover image")
 	ErrNoMessage     = errors.New("no Dovlet message found; the image may have been recompressed or edited")
 	ErrBadPayload    = errors.New("image data is invalid or corrupted")
 )
@@ -68,7 +68,7 @@ func extract(p pixels) ([]byte, error) {
 		return nil, ErrNoMessage
 	}
 	n := int64(binary.BigEndian.Uint32(h[8:]))
-	if n < 22 || n > int64(capBytes-headerLen) || n > MaxTextBytes+10000 {
+	if n < 22 || n > int64(capBytes-headerLen) || n > MaxZipBytes+10000 {
 		return nil, ErrBadPayload
 	}
 	return read(int(n) + headerLen)[headerLen:], nil

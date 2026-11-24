@@ -1,6 +1,7 @@
 package dovlet
 
 import (
+	"archive/zip"
 	"bytes"
 	"errors"
 	"image"
@@ -34,7 +35,7 @@ func TestZipRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := OpenZip(archive, testPassword)
-	if err != nil || !bytes.Equal(got, unicodeText) {
+	if err != nil || !got.IsText() || !bytes.Equal(got.Data, unicodeText) {
 		t.Fatalf("round trip failed: %v", err)
 	}
 	if _, err := OpenZip(archive, "wrong-password"); err == nil {
@@ -44,7 +45,7 @@ func TestZipRoundTrip(t *testing.T) {
 	for i := 60; i < len(archive)-100; i += 97 {
 		tampered := bytes.Clone(archive)
 		tampered[i] ^= 1
-		if got, err := OpenZip(tampered, testPassword); err == nil && !bytes.Equal(got, unicodeText) {
+		if got, err := OpenZip(tampered, testPassword); err == nil && !bytes.Equal(got.Data, unicodeText) {
 			t.Fatalf("tampering at %d produced different plaintext", i)
 		}
 	}
@@ -52,6 +53,88 @@ func TestZipRoundTrip(t *testing.T) {
 	tampered[100] ^= 1
 	if _, err := OpenZip(tampered, testPassword); err == nil {
 		t.Fatal("tampered ciphertext accepted")
+	}
+}
+
+// makeInnerZip builds a small two-file ZIP for file-mode tests.
+func makeInnerZip(t *testing.T) []byte {
+	t.Helper()
+	var inner bytes.Buffer
+	zw := zip.NewWriter(&inner)
+	w, err := zw.Create("a.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte("hello zip")); err != nil {
+		t.Fatal(err)
+	}
+	w, err = zw.Create("b.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte{0, 1, 2, 255}); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return inner.Bytes()
+}
+
+func TestZipFileRoundTrip(t *testing.T) {
+	innerBytes := makeInnerZip(t)
+	if innerBytes[0] != 'P' || innerBytes[1] != 'K' {
+		t.Fatal("inner ZIP has no PK signature")
+	}
+	archive, err := SealZipFile("photos.zip", innerBytes, testPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := OpenZip(archive, testPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.IsText() || entry.Filename != "photos.zip" || !bytes.Equal(entry.Data, innerBytes) {
+		t.Fatalf("file round trip: %+v", entry)
+	}
+	if _, err := OpenZip(archive, "wrong-password"); err == nil {
+		t.Fatal("wrong password accepted")
+	}
+	// A path is reduced to its base name when sealing, and the archive opens.
+	pathArchive, err := SealZipFile("../photos.zip", innerBytes, testPassword)
+	if err != nil {
+		t.Fatalf("path not reduced to base name: %v", err)
+	}
+	pathEntry, err := OpenZip(pathArchive, testPassword)
+	if err != nil || pathEntry.Filename != "photos.zip" || !bytes.Equal(pathEntry.Data, innerBytes) {
+		t.Fatalf("path archive did not open as photos.zip: %v %+v", err, pathEntry)
+	}
+	// SealZipFile rejects non-ZIP data, bad names and oversize input.
+	for _, c := range []struct {
+		name string
+		data []byte
+	}{
+		{"photos.zip", []byte("not a zip")},
+		{"photos.txt", innerBytes},
+		{"", innerBytes},
+		{"pho\x1b[31mtos.zip", innerBytes},
+		{"pho\nto.zip", innerBytes},
+		{"photos.zip", bytes.Repeat([]byte("x"), MaxZipBytes+1)},
+	} {
+		if _, err := SealZipFile(c.name, c.data, testPassword); err == nil {
+			t.Fatalf("accepted invalid ZIP file %q (%d bytes)", c.name, len(c.data))
+		}
+	}
+	// OpenZip rejects an encrypted entry that is neither message.txt nor a .zip,
+	// and an entry name that tries to escape with a path.
+	for _, name := range []string{"notes.pdf", "../photos.zip", "pho\x1b[31mtos.zip"} {
+		bad, err := sealEntry(name, []byte("x"), testPassword, zip.Deflate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := OpenZip(bad, testPassword); err == nil {
+			t.Fatalf("entry %q accepted", name)
+		}
 	}
 }
 
@@ -94,8 +177,8 @@ func TestEncodeDecode(t *testing.T) {
 	if res.Width != 1200 || res.Height != 1200 {
 		t.Fatalf("default cover is %dx%d", res.Width, res.Height)
 	}
-	text, _, err := Decode(res.PNG, testPassword)
-	if err != nil || !bytes.Equal(text, unicodeText) {
+	entry, _, err := Decode(res.PNG, testPassword)
+	if err != nil || !entry.IsText() || !bytes.Equal(entry.Data, unicodeText) {
 		t.Fatalf("decode: %v", err)
 	}
 	if _, _, err := Decode(res.PNG, "wrong-password-xyz"); !errors.Is(err, ErrBadPassword) {
@@ -111,6 +194,34 @@ func TestEncodeDecode(t *testing.T) {
 	// 12 code points, more bytes: allowed, like Array.from(password).length.
 	if _, err := Encode([]byte("x"), "ááááááááááá1", nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestEncodeDecodeFile(t *testing.T) {
+	innerBytes := makeInnerZip(t)
+	res, err := EncodeFile("photos.zip", innerBytes, testPassword, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Entry != "photos.zip" {
+		t.Fatalf("entry is %q", res.Entry)
+	}
+	entry, _, err := Decode(res.PNG, testPassword)
+	if err != nil || entry.IsText() || entry.Filename != "photos.zip" || !bytes.Equal(entry.Data, innerBytes) {
+		t.Fatalf("decode file: %v", err)
+	}
+	for _, c := range []struct {
+		name, pw string
+		data     []byte
+	}{
+		{"photos.zip", testPassword, []byte("not a zip")},
+		{"photos.txt", testPassword, innerBytes},
+		{"photos.zip", "short", innerBytes},
+		{"photos.zip", testPassword, bytes.Repeat([]byte("x"), MaxZipBytes+1)},
+	} {
+		if _, err := EncodeFile(c.name, c.data, c.pw, nil); err == nil {
+			t.Fatalf("accepted invalid file input %q/%q (%d bytes)", c.name, c.pw, len(c.data))
+		}
 	}
 }
 
@@ -208,8 +319,8 @@ func TestWebInterop(t *testing.T) {
 		img := &image.NRGBA{Pix: raw, Stride: 1200 * 4, Rect: image.Rect(0, 0, 1200, 1200)}
 		var buf bytes.Buffer
 		png.Encode(&buf, img)
-		text, _, err := Decode(buf.Bytes(), testPassword)
-		if err != nil || !bytes.Equal(text, unicodeText) {
+		entry, _, err := Decode(buf.Bytes(), testPassword)
+		if err != nil || !entry.IsText() || !bytes.Equal(entry.Data, unicodeText) {
 			t.Fatalf("decode web image: %v", err)
 		}
 	})
@@ -227,6 +338,38 @@ func TestWebInterop(t *testing.T) {
 		got, _ := os.ReadFile(out)
 		if !bytes.Equal(got, unicodeText) {
 			t.Fatal("web app could not read the CLI image")
+		}
+	})
+
+	t.Run("web zip to cli", func(t *testing.T) {
+		inner := makeInnerZip(t)
+		zipPath, rgba := filepath.Join(dir, "photos.zip"), filepath.Join(dir, "webzip.rgba")
+		os.WriteFile(zipPath, inner, 0o600)
+		run("embed-zip", "1200", "1200", zipPath, rgba)
+		raw, _ := os.ReadFile(rgba)
+		img := &image.NRGBA{Pix: raw, Stride: 1200 * 4, Rect: image.Rect(0, 0, 1200, 1200)}
+		var buf bytes.Buffer
+		png.Encode(&buf, img)
+		entry, _, err := Decode(buf.Bytes(), testPassword)
+		if err != nil || entry.IsText() || entry.Filename != "photos.zip" || !bytes.Equal(entry.Data, inner) {
+			t.Fatalf("decode web ZIP image: %v", err)
+		}
+	})
+
+	t.Run("cli zip to web", func(t *testing.T) {
+		inner := makeInnerZip(t)
+		res, err := EncodeFile("photos.zip", inner, testPassword, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m, _ := png.Decode(bytes.NewReader(res.PNG))
+		p := toNRGBA(m)
+		rgba, out := filepath.Join(dir, "cli.rgba"), filepath.Join(dir, "out.zip")
+		os.WriteFile(rgba, p.pix, 0o600)
+		run("extract-zip", "1200", "1200", rgba, out)
+		got, _ := os.ReadFile(out)
+		if !bytes.Equal(got, inner) {
+			t.Fatal("web app could not read the CLI ZIP image")
 		}
 	})
 }

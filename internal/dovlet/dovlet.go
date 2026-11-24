@@ -1,4 +1,4 @@
-// Package dovlet hides a password-encrypted text message inside a PNG.
+// Package dovlet hides a password-encrypted text message or ZIP file inside a PNG.
 // The format is byte-compatible with the Dovlet web app
 // (https://github.com/and1truong/dovlet).
 package dovlet
@@ -20,6 +20,7 @@ import (
 
 const (
 	MaxTextBytes      = 500_000
+	MaxZipBytes       = 1_400_000
 	MaxImageBytes     = 25 << 20
 	MaxImagePixels    = 16_000_000
 	MinPasswordRunes  = 12
@@ -32,6 +33,9 @@ type Result struct {
 	Width, Height int
 	ZipBytes      int
 	Capacity      int
+	// Entry is the name stored in the encrypted ZIP:
+	// "message.txt" for text, the original filename for a ZIP file.
+	Entry string
 }
 
 // ValidateMessage applies the web app's input rules.
@@ -59,7 +63,45 @@ func Encode(text []byte, password string, cover []byte) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("encrypt: %w", err)
 	}
+	res, err := encodeArchive(archive, password, cover)
+	if err != nil {
+		return nil, err
+	}
+	res.Entry = entryName
+	return res, nil
+}
+
+// EncodeFile encrypts a ZIP file, embeds it into cover (nil means the
+// built-in apple) and returns the PNG after verifying it decodes back to
+// the same file. The filename is kept as the ZIP entry name.
+func EncodeFile(filename string, data []byte, password string, cover []byte) (*Result, error) {
+	name, err := SafeZipName(filename)
+	if err != nil {
+		return nil, err
+	}
+	if err := ValidateZipFile(name, data); err != nil {
+		return nil, err
+	}
+	if utf8.RuneCountInString(password) < MinPasswordRunes {
+		return nil, fmt.Errorf("password must be at least %d characters", MinPasswordRunes)
+	}
+	archive, err := SealZipFile(name, data, password)
+	if err != nil {
+		return nil, fmt.Errorf("encrypt: %w", err)
+	}
+	res, err := encodeArchive(archive, password, cover)
+	if err != nil {
+		return nil, err
+	}
+	res.Entry = name
+	return res, nil
+}
+
+// encodeArchive embeds an already-sealed archive into cover and returns the
+// PNG after verifying the exported image decodes back to the same archive.
+func encodeArchive(archive []byte, password string, cover []byte) (*Result, error) {
 	var canvas *image.RGBA
+	var err error
 	if cover == nil {
 		canvas = Apple()
 	} else if canvas, err = renderCover(cover); err != nil {
@@ -73,15 +115,16 @@ func Encode(text []byte, password string, cover []byte) (*Result, error) {
 	if err := png.Encode(&out, canvas); err != nil {
 		return nil, fmt.Errorf("encode PNG: %w", err)
 	}
-	got, _, err := Decode(out.Bytes(), password)
-	if err != nil || !bytes.Equal(got, text) {
+	_, got, err := Decode(out.Bytes(), password)
+	if err != nil || !bytes.Equal(got, archive) {
 		return nil, errors.New("self-check failed: the exported image did not decode to the original message")
 	}
-	return &Result{out.Bytes(), b.Dx(), b.Dy(), len(archive), Capacity(b.Dx(), b.Dy())}, nil
+	return &Result{PNG: out.Bytes(), Width: b.Dx(), Height: b.Dy(), ZipBytes: len(archive), Capacity: Capacity(b.Dx(), b.Dy())}, nil
 }
 
-// Decode extracts and decrypts the message. It also returns the encrypted ZIP.
-func Decode(img []byte, password string) (text, archive []byte, err error) {
+// Decode extracts and decrypts the message or ZIP file. It also returns the
+// encrypted ZIP.
+func Decode(img []byte, password string) (entry *Entry, archive []byte, err error) {
 	m, err := loadImage(img)
 	if err != nil {
 		return nil, nil, err
@@ -89,10 +132,10 @@ func Decode(img []byte, password string) (text, archive []byte, err error) {
 	if archive, err = extract(toNRGBA(m)); err != nil {
 		return nil, nil, err
 	}
-	if text, err = OpenZip(archive, password); err != nil {
+	if entry, err = OpenZip(archive, password); err != nil {
 		return nil, nil, ErrBadPassword
 	}
-	return text, archive, nil
+	return entry, archive, nil
 }
 
 func loadImage(data []byte) (image.Image, error) {
